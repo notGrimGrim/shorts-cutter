@@ -302,7 +302,10 @@ def _transcribe(source, slug, args, ffmpeg=None):
     length = (download.probe(source)["duration"] if _is_url(source)
               else download.local_info(source, ffmpeg)["duration"])
     return speech.transcribe(
-        ffmpeg, track, download.workdir(slug), args.model, args.lang,
+        # cmd_cut зовёт этот путь тоже (см. ниже), а у него нет своего
+        # --model — getattr берёт тот же DEFAULT, что и у speech.transcribe.
+        ffmpeg, track, download.workdir(slug),
+        getattr(args, "model", speech.DEFAULT), args.lang,
         on_note=talk,
         # Длительность нужна облаку: по ней проверяется бесплатная квота
         # до отправки, а не после отказа сервера.
@@ -453,7 +456,19 @@ def cmd_cut(args):
     if end <= start:
         raise SystemExit("конец куска раньше начала")
 
-    words = None if args.no_subs else _load_words(args.source, args.lang, args.subs)
+    words = None
+    if not args.no_subs:
+        try:
+            words = _load_words(args.source, args.lang, args.subs)
+        except RuntimeError as error:
+            # Тот же уход на Whisper, что и в _analyze() (scan/auto) — без
+            # него `cut --pick N` падал на роликах без субтитров, хотя
+            # тот же ролик секундой раньше прошёл scan через тот же Whisper.
+            if not _is_url(args.source) or "не нашлись" not in str(error):
+                raise
+            print(f"  ! {error}")
+            print("  ухожу на локальный Whisper")
+            words = _transcribe(args.source, slug, args, ffmpeg)
     video = _video(args.source, slug, args.height, ffmpeg)
 
     _make(ffmpeg, video, slug, words, start, end, args, args.out, title,
