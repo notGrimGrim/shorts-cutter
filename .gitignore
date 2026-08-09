@@ -1,0 +1,7 @@
+work/
+shorts/
+__pycache__/
+.venv/
+*.mp4
+*.json
+groq-key.txt
