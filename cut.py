@@ -478,7 +478,14 @@ def cmd_cut(args):
             words = _transcribe(args.source, slug, args, ffmpeg)
     video = _video(args.source, slug, args.height, ffmpeg)
 
+    # Та же группировка, что и в cmd_auto (см. её комментарий): несколько
+    # --pick по одному ролику иначе сваливаются в shorts/ вперемешку с
+    # чужими. args.out явный — это override, folder тогда не смотрится
+    # (см. _make: out is None — единственное условие, когда он в ход идёт).
+    video_title = _title(args.source)
+    folder = OUT / download.safe_name(video_title)
     _make(ffmpeg, video, slug, words, start, end, args, args.out, title,
+          video_title=video_title, folder=folder,
           tiles=_tiles(ffmpeg, video, slug))
     print("Посмотри глазами перед отправкой — автомат не судья.")
 
