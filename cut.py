@@ -444,7 +444,14 @@ def _pick_range(args, slug):
         raise SystemExit(f"--pick вне диапазона 1..{len(found)}")
 
     chosen = found[args.pick - 1]
-    return chosen["start"], chosen["end"], chosen.get("title", "")
+    # Pair — дataclass с полем hook (pairs.Pair.title — это @property-алиас
+    # для него, dataclasses.asdict() в scan.to_json() свойства не сериализует).
+    # Ключ "title" в candidates.json никогда не было — chosen.get("title", "")
+    # молча возвращал "", и _banner() у каждого cut --pick терял надпись,
+    # которую подобрала/переписала модель, и падал на речь-эвристику вместо
+    # неё (живой пример: «И для этого нам нужно перестать воспринимать 10
+    # плюс 3 единым» вместо «Что такое раскрытие скобок?»).
+    return chosen["start"], chosen["end"], chosen.get("hook", "")
 
 
 def cmd_cut(args):
