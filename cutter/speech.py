@@ -113,6 +113,13 @@ def ready(model=DEFAULT):
     return have[-1] if have else model
 
 
+# Ниже этой уверенности слово в словарь-подсказку не идёт (см. vocabulary).
+# Значение взято с потолка и не проверено замером: в кэше расшифровок оценка
+# модели до сих пор не сохранялась, сравнить ослышки с настоящими словами
+# было не на чем. Ошибка здесь дёшева — слишком высокий порог оставит
+# подсказку пустой, то есть вернёт поведение, которое и так было до словаря.
+SURE_ENOUGH = 0.65
+
 # Сколько кусков звука отдавать видеокарте разом. Без батчей она простаивает
 # между короткими шагами декодирования: замер на восьми минутах речи —
 # 55.5 с обычным проходом против 13.6 с батчами, вчетверо.
@@ -178,9 +185,25 @@ def _run(engine, track, language, hint=None):
         # прозвучат. См. keywords.speech_hint.
         initial_prompt=hint or None,
         beam_size=BEAM,
-        # Без этого библиотека при неуверенности перезапускает кусок с
-        # температурой повыше — иногда спасает, но чаще просто тратит время.
-        temperature=0,
+        # Модель НЕ кормится собственным прошлым выводом. По умолчанию
+        # библиотека делает наоборот, и на музыке, скандировании и криках это
+        # кончается петлёй: замер на стриме CS2 (xtxjqOJJvhM) — 571 слово, из
+        # них «победа» 125 раз, «турнире» 135, то есть ~70% расшифровки одна
+        # фраза по кругу. Модель повторяла то, что сама же выдала шагом раньше.
+        # Связность между отрезками от этого страдает, но связный бред хуже
+        # разрозненной правды.
+        condition_on_previous_text=False,
+        # Встроенный антизацикливатель: если кусок вышел слишком
+        # повторяющимся (compression_ratio) или слишком неуверенным
+        # (log_prob), библиотека перегоняет его заново с температурой повыше.
+        # Раньше здесь стоял жёсткий temperature=0 — то есть ровно этот
+        # механизм был выключен, и петлю ловить было нечем.
+        temperature=(0.0, 0.2, 0.4, 0.6, 0.8, 1.0),
+        compression_ratio_threshold=2.4,
+        log_prob_threshold=-1.0,
+        # Кусок, который модель сама сочла тишиной, в текст не идёт: на
+        # рекламных вставках и музыке она охотно придумывает слова.
+        no_speech_threshold=0.6,
     )
     # Батчевый движок отличается только этим параметром; обычный его не знает.
     if type(engine).__name__ == "BatchedInferencePipeline":
@@ -361,9 +384,16 @@ def vocabulary(workdir, title="", on_note=None):
     if known:
         try:
             saved = json.loads(known[0].read_text(encoding="utf-8"))
-            heard = keywords.learned_terms(
-                [Word(w["start"], w["end"], w["text"]) for w in saved]
-            )
+            # Только то, в чём модель сама уверена. Подсказка — это образец
+            # ПРАВОПИСАНИЯ, и ослышка в ней закрепляет ошибку: на стриме CS2
+            # в словарь попали «ПОПЕДА» и «КАЕВ», и следующий прогон получал
+            # их как эталон. Модель послушная — писала бы так и дальше.
+            trusted = [
+                Word(w["start"], w["end"], w["text"], sure=w.get("sure", 1.0))
+                for w in saved
+                if w.get("sure", 1.0) >= SURE_ENOUGH
+            ]
+            heard = keywords.learned_terms(trusted)
         except (OSError, ValueError, KeyError, TypeError) as error:
             # Без словаря распознавание просто останется прежним — это не повод
             # ронять весь запуск.
@@ -431,7 +461,12 @@ def transcribe(ffmpeg, track, workdir, model=DEFAULT, language="ru",
         saved = json.loads(cache.read_text(encoding="utf-8"))
         if on_note:
             on_note(f"беру готовую расшифровку ({len(saved)} слов)")
-        return [Word(w["start"], w["end"], w["text"]) for w in saved]
+        # sure в старых кэшах нет: там оценка модели терялась при записи.
+        # Единица значит «сомнений не заявлено» — то же, что было раньше.
+        return [
+            Word(w["start"], w["end"], w["text"], sure=w.get("sure", 1.0))
+            for w in saved
+        ]
 
     if where == "auto":
         where = where_to_run(duration)
@@ -447,7 +482,15 @@ def transcribe(ffmpeg, track, workdir, model=DEFAULT, language="ru",
 
     cache.write_text(
         json.dumps(
-            [{"start": w.start, "end": w.end, "text": w.text} for w in words],
+            # sure пишем в кэш: это единственный признак ослышки, который у нас
+            # есть, а терялся он ровно здесь — на повторном прогоне все слова
+            # становились одинаково «верными», и словарь-подсказка собирался
+            # из мусора наравне с настоящими терминами (см. vocabulary).
+            [
+                {"start": w.start, "end": w.end, "text": w.text,
+                 "sure": round(w.sure, 3)}
+                for w in words
+            ],
             ensure_ascii=False,
         ),
         encoding="utf-8",

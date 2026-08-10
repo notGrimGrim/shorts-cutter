@@ -308,9 +308,63 @@ def from_keys(keys, limit=HOOK_LIMIT):
     return hook("Про " + " и ".join(picked), limit)
 
 
+# Сколько слов подряд считаем повторяющимся куском. Больше шести — это уже
+# не заклинание в кадре, а две похожие мысли, и склеивать их нельзя.
+_REPEAT_BLOCK = 6
+
+
+def undouble(text, most=_REPEAT_BLOCK):
+    """Схлопывает подряд идущие повторы: «А Б А Б А» → «А Б».
+
+    Живая речь повторяется сама (скандирование на стриме, выкрики), и то же
+    делает зациклившийся распознаватель. В плашку это уезжало как есть:
+    «ПОБЕДА НА ТУРНИРЕ ПОБЕДА НА ТУРНИРЕ ПОБЕДА НА ТУРНИРЕ ПОБЕДА» —
+    и в кадре, и в имени файла.
+
+    Убираем повтор любой длины, а не только одно слово подряд: беда именно
+    в блоках. Сравниваем без регистра — «Победа» и «ПОБЕДА» здесь одно и то же.
+    """
+    words = text.split()
+    kept = []
+    place = 0
+    # Размер блока, схлопнутого на прошлом шаге. Нужен для оборванного хвоста
+    # в самом конце — но только там, где повтор уже случился (см. ниже).
+    collapsed = 0
+
+    while place < len(words):
+        skipped = False
+        # Длинные блоки проверяем первыми: иначе «А Б А Б» схлопнется по
+        # одному слову и оставит хвост.
+        for size in range(min(most, len(kept)), 0, -1):
+            here = [w.lower() for w in words[place:place + size]]
+            before = [w.lower() for w in kept[-size:]]
+            if len(here) == size and here == before:
+                place += size
+                collapsed = size
+                skipped = True
+                break
+
+        # Оборванный повтор в самом конце: «А Б А Б А» оставляла хвост «А»,
+        # и в плашке висело «ПОБЕДА НА ТУРНИРЕ ПОБЕДА». Хвост режем только
+        # если блок перед ним и правда повторялся: без этой оговорки правило
+        # отъедало законное последнее слово у «я хочу сказать что я».
+        if not skipped and collapsed:
+            tail = [w.lower() for w in words[place:]]
+            head = [w.lower() for w in kept[-collapsed:]]
+            if tail and len(tail) < collapsed and head[:len(tail)] == tail:
+                break
+
+        if not skipped:
+            kept.append(words[place])
+            place += 1
+            collapsed = 0
+
+    return " ".join(kept)
+
+
 def _tidy(piece):
-    """Убирает зачин и запинки живой речи."""
-    piece = _STUTTER.sub(r"\1", re.sub(r"\s+", " ", piece)).strip()
+    """Убирает зачин, запинки живой речи и повторы."""
+    piece = undouble(_STUTTER.sub(r"\1", re.sub(r"\s+", " ", piece)).strip())
     while True:
         shorter = _FILLER.sub("", piece, count=1).strip()
         if shorter == piece:
@@ -372,7 +426,7 @@ def hook(title, limit=HOOK_LIMIT):
     зрителю от этой честности ни тепло ни холодно: надпись должна читаться
     как готовая фраза, поэтому лучше отрезать лишнее слово.
     """
-    text = _drop_tail(re.sub(r"\s+", " ", title).strip(" .•—-"))
+    text = _drop_tail(undouble(re.sub(r"\s+", " ", title).strip(" .•—-")))
     if len(text) <= limit:
         return text
 
