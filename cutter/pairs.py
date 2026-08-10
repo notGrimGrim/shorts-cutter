@@ -477,7 +477,40 @@ def _topic_ceiling(lines, boundary):
     return ceiling
 
 
-def _fit_end(lines, entry, low, high, topics=frozenset()):
+def _chapter_bound_index(lines, marks, start_time, low):
+    """Индекс первого предложения на границе СЛЕДУЮЩЕЙ авторской главы.
+
+    Та же роль, что и boundary из _topic_marks (где остановиться, чтобы не
+    перескочить самым дальним концом в чужую тему) — но граница здесь не
+    эвристика по тексту, а точный таймкод из marks (реальные главы ролика,
+    из метаданных). Живой случай (CdcVjxzcmwc): окно «КАК РАСКРЫТЬ СКОБКИ?»
+    (508.34–627.63с) залезало на 42.6с в следующую главу «ФОРМУЛЫ. НО
+    СПЕРВА АНЕКДОТ» (585.0–764.0с) — ровно на завязку анекдота, без
+    развязки (она звучит на ~74с дальше границы). marks были доступны
+    build() всегда — просто не доходили до _fit_end, только до _plashka.
+
+    Вход не всегда лежит в той главе, которую потом покажет _majority_chapter
+    (у неё большинство длительности окна, не обязательно первые секунды):
+    тот же живой случай начинается за 11.6с до конца ЕЩЁ ПРЕДЫДУЩЕЙ главы,
+    и первая попавшаяся граница (её собственный конец) — не та, что нужна,
+    это всё ещё, по сути, начало окна, а не выход из его темы. Поэтому
+    пропускаем главы, в которых от входа остаётся меньше low секунд.
+    """
+    if not marks:
+        return None
+    for mark in marks:
+        if mark.end <= start_time:
+            continue
+        if mark.end - max(start_time, mark.start) < low:
+            continue
+        for index, line in enumerate(lines):
+            if line.start >= mark.end:
+                return index
+        return None
+    return None
+
+
+def _fit_end(lines, entry, low, high, topics=frozenset(), marks=()):
     """Индексы предложений, которыми по-честному может кончиться окно.
 
     Порядок предпочтений — сначала точка, «!» или «?» (мысль договорена),
@@ -532,6 +565,13 @@ def _fit_end(lines, entry, low, high, topics=frozenset()):
         return []
     far = max(pool)
     ends = [far]
+
+    # Реальная граница главы — надёжнее эвристики _topic_marks там, где
+    # обе нашлись (она не гадает по тексту, а знает точный таймкод) —
+    # поэтому при конфликте берём более раннюю (более осторожную) из двух.
+    chapter_bound = _chapter_bound_index(lines, marks, start, low)
+    if chapter_bound is not None and (boundary is None or chapter_bound < boundary):
+        boundary = chapter_bound
 
     if boundary is not None:
         ceiling = _topic_ceiling(lines, boundary)
@@ -619,7 +659,7 @@ def build(words, marks=(), low=LOW, high=HIGH):
 
     found = []
     for entry in _entries(lines):
-        for exit_index in _fit_end(lines, entry, low, high, topics):
+        for exit_index in _fit_end(lines, entry, low, high, topics, marks_sorted):
             start, end = lines[entry].start, lines[exit_index].end
             hook, chapter = _plashka(lines, marks_sorted, entry, exit_index, start, end)
             found.append(Pair(
