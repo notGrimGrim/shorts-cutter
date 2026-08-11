@@ -156,8 +156,19 @@ def per_word(words, samples, span=6.0):
         return None
 
     base = _median(speech)
+
     # Разброс живой речи — примерно столько децибел над медианой.
-    top = (_median([db for db in speech if db > base]) - base) or 3.0
+    #
+    # Запасное значение берётся явной проверкой, а не через `or`: раньше
+    # стояло `(_median(...) - base) or 3.0`, и оно не срабатывало никогда.
+    # На ровной дорожке список громче медианы оказывается пустым, _median
+    # отдаёт 0.0, а `0.0 - base` — это не ноль, а модуль самой медианы
+    # (громкость в дБ отрицательная): вместо трёх децибел разброса выходило
+    # тридцать, и все слова получали одинаковый ноль громкости.
+    louder = [db for db in speech if db > base]
+    top = _median(louder) - base if louder else 0.0
+    if top < 1.0:
+        top = 3.0
 
     times = [moment for moment, _ in samples]
     peaks = _rolling_max(times, [db for _, db in samples], span)
