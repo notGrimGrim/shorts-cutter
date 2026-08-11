@@ -184,6 +184,23 @@ def window(args):
     }
 
 
+def no_ads(found):
+    """Выбрасывает рекламные вставки из того, что нашёл scan.find.
+
+    Основной путь (pairs.plan) фильтрует рекламу сам, а резервный — нет:
+    у scan своя чёрная метка (NEVER), и она ищет «промокод» и «подпишись»,
+    а живая интеграция звучит иначе. Живой случай: модель отвела все окна,
+    работа ушла на резерв — и первым кандидатом встала минутная реклама
+    стороннего сервиса. Именно тот случай, ради которого фильтр писался.
+    """
+    honest = [piece for piece in found if not pairs.is_ad(piece.text)]
+    if honest and len(honest) < len(found):
+        print(f"  отсеял рекламных вставок: {len(found) - len(honest)}")
+        return honest
+    # Всё похоже на рекламу — значит промахнулся фильтр, а не автор ролика.
+    return found
+
+
 def span(args):
     """Заданная длина куска в секундах, с умолчанием: (минимум, максимум).
 
@@ -415,16 +432,16 @@ def cmd_scan(args):
     # Со словами-обязательствами ищем по-старому: там человек задаёт, о чём
     # шортс, и пары «вопрос → ответ» этот заказ не выполняют.
     if must:
-        found = scan.find(
+        found = no_ads(scan.find(
             words, least, most, args.top, terms, marks, energy, must=must
-        )
+        ))
     else:
         found = _moments(words, marks, terms, energy, args.source, args.top,
                          brain=args.brain, window_args=window(args))
         if not found:
-            found = scan.find(
+            found = no_ads(scan.find(
                 words, least, most, args.top, terms, marks, energy
-            )
+            ))
 
     if not found:
         raise SystemExit(
@@ -546,10 +563,10 @@ def cmd_auto(args):
                 # работает прежний расчёт по плотности речи.
                 print("  пар «вопрос → ответ» не нашлось — ищу по-старому")
                 least, most = span(args)
-                found = scan.find(
+                found = no_ads(scan.find(
                     words, least, most, args.count, terms, marks, energy,
                     must=_must_words(args),
-                )
+                ))
             if not found:
                 least, most = span(args)
                 raise RuntimeError(
