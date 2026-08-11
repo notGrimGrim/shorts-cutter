@@ -127,6 +127,24 @@ def ask_words(question):
     return [word for word in answer.replace(",", " ").split() if len(word) > 2]
 
 
+def no_ads(found):
+    """Выбрасывает рекламные вставки из того, что нашёл scan.find.
+
+    Пары «вопрос → ответ» фильтруются в pairs.plan, а поиск по плотности
+    речи — нет: у scan своя чёрная метка, и она ловит «промокод» и
+    «подпишись», а живая интеграция звучит обычным разговором. Живой
+    случай: модель отвела все окна, мастер ушёл на старый поиск и нарезал
+    минутную рекламу стороннего сервиса — единственным шортсом.
+    """
+    honest = [piece for piece in found if not pairs.is_ad(piece.text)]
+    if honest and len(honest) < len(found):
+        print(paint(f"  отсеял рекламных вставок: {len(found) - len(honest)}",
+                    "dim"))
+        return honest
+    # Всё похоже на рекламу — значит промахнулся фильтр, а не автор ролика.
+    return found
+
+
 def offer_related(words, seeds, found, limits, picks):
     """Предлагает дорезать по словам, которые ходят рядом с заданными.
 
@@ -144,7 +162,7 @@ def offer_related(words, seeds, found, limits, picks):
     ):
         return found
 
-    extra = scan.find(words, *limits, top=5, must=close, **picks)
+    extra = no_ads(scan.find(words, *limits, top=5, must=close, **picks))
     # Кусок, который уже выбран, второй раз не предлагаем.
     fresh = [
         candidate for candidate in extra
@@ -330,7 +348,7 @@ def run_once(ffmpeg):
             if not seeds:
                 print(paint("  без слов этот режим не работает", "warn"))
 
-        found = scan.find(words, *limits, top=10, must=seeds, **picks)
+        found = no_ads(scan.find(words, *limits, top=10, must=seeds, **picks))
         if not found:
             raise RuntimeError(
                 f"с этими словами ничего не нашлось: {', '.join(seeds)}.\n"
@@ -352,7 +370,7 @@ def run_once(ffmpeg):
                            video_title=info["title"], on_note=note)
         if not found:
             note("пар «вопрос → ответ» не нашлось — ищу по-старому")
-            found = scan.find(words, *limits, top=want, **picks)
+            found = no_ads(scan.find(words, *limits, top=want, **picks))
         if not found:
             raise RuntimeError("подходящих кусков не нашлось")
 
@@ -360,7 +378,7 @@ def run_once(ffmpeg):
         show_candidates(found)
     else:
         seeds = keywords.top_terms(words, 6)
-        found = scan.find(words, *limits, top=10, **picks)
+        found = no_ads(scan.find(words, *limits, top=10, **picks))
         if not found:
             raise RuntimeError("подходящих кусков не нашлось")
         print(f"\n  {paint('опорные слова:', 'dim')} {', '.join(keywords.top_terms(words, 8))}")
