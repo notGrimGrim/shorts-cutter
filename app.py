@@ -268,18 +268,14 @@ def run_once(ffmpeg):
             # текст только распознаванием.
             text_from = 2
 
-    # Словарь темы — из расшифровки этого же ролика, если она уже лежит в
-    # рабочей папке; иначе подсказка стоит на одном названии. Нужен он
-    # только когда распознаём — на субтитрах YouTube это трата времени.
-    hint = ""
-    if text_from in (1, 2):
-        hint = speech.vocabulary(
-            download.workdir(info["id"]), info["title"], on_note=note
-        )
+    # Модель распознавания — та, что уже лежит на диске. Просить DEFAULT
+    # вслепую нельзя: на чужой машине её может не быть, и мастер молча
+    # уходил качать гигабайты, показывая застывшую строку «распознаю…».
+    model = speech.ready()
 
     if text_from == 2:
         words = speech.transcribe(
-            ffmpeg, track, download.workdir(info["id"]), on_note=note, hint=hint
+            ffmpeg, track, download.workdir(info["id"]), model, on_note=note
         )
     else:
         note("качаю субтитры…")
@@ -294,11 +290,8 @@ def run_once(ffmpeg):
                 raise
             note(f"! {error}")
             note("субтитров нет — распознаю речь сам")
-            hint = hint or speech.vocabulary(
-                download.workdir(info["id"]), info["title"], on_note=note
-            )
             words = speech.transcribe(
-                ffmpeg, track, download.workdir(info["id"]), on_note=note, hint=hint
+                ffmpeg, track, download.workdir(info["id"]), model, on_note=note
             )
 
     if not words:
@@ -416,8 +409,8 @@ def run_once(ffmpeg):
         if text_from == 1:
             note("распознаю текст этого куска…")
             spoken = speech.for_segment(
-                ffmpeg, local, candidate.start, candidate.end,
-                on_note=note, hint=hint,
+                ffmpeg, local, candidate.start, candidate.end, model,
+                on_note=note,
             )
         else:
             spoken = words

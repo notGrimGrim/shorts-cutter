@@ -248,7 +248,7 @@ def _size_mb(path):
 
 # ── запрос ────────────────────────────────────────────────────────────────
 
-def _form(path, language, hint):
+def _form(path, language):
     """Тело multipart-запроса. Без сторонних библиотек: нужен один запрос."""
     line = uuid.uuid4().hex
     body = bytearray()
@@ -270,9 +270,6 @@ def _form(path, language, hint):
     # заставляла модель выдавать эту фразу вместо речи и терять до 80% слов —
     # замер и цифры в speech._run. У Groq под капотом тот же whisper-large-v3,
     # поэтому и поведение то же.
-    #
-    # Аргумент hint оставлен в сигнатурах: его передаёт speech._from_cloud,
-    # и ломать вызовы ради этой правки незачем.
 
     body.extend(f"--{line}\r\n".encode())
     body.extend(
@@ -286,8 +283,8 @@ def _form(path, language, hint):
     return bytes(body), f"multipart/form-data; boundary={line}"
 
 
-def _ask(path, language, hint):
-    payload, kind = _form(path, language, hint)
+def _ask(path, language):
+    payload, kind = _form(path, language)
     request = urllib.request.Request(
         URL, data=payload,
         headers={
@@ -298,7 +295,7 @@ def _ask(path, language, hint):
     )
     try:
         with urllib.request.urlopen(request, timeout=TIMEOUT) as answer:
-            return json.loads(answer.read().decode("utf-8"))
+            raw = answer.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as error:
         detail = error.read().decode("utf-8", "replace")[:300]
         if error.code == 429:
@@ -313,6 +310,15 @@ def _ask(path, language, hint):
         raise CloudFailed(f"Groq ответил {error.code}: {detail}") from None
     except (urllib.error.URLError, OSError) as error:
         raise CloudFailed(f"до Groq не достучаться: {error}") from None
+
+    # Ответ с кодом 200 — ещё не обязательно JSON: посредник или страница
+    # техработ отдаёт HTML тем же кодом. Раньше такой ответ ронял всю
+    # программу через JSONDecodeError, хотя весь смысл облака в том, что при
+    # любой его неудаче мы просто считаем на своей машине.
+    try:
+        return json.loads(raw)
+    except ValueError:
+        raise CloudFailed(f"Groq ответил не JSON: {raw[:200]}") from None
 
 
 def _words(reply, shift=0.0):
@@ -334,7 +340,7 @@ def _words(reply, shift=0.0):
 
 # ── то, ради чего всё ─────────────────────────────────────────────────────
 
-def transcribe(ffmpeg, track, duration, language="ru", hint=None, on_note=None):
+def transcribe(ffmpeg, track, duration, language="ru", on_note=None):
     """Распознаёт дорожку через Groq и отдаёт слова с таймкодами.
 
     duration — длительность в секундах, нужна для проверки квоты до отправки.
@@ -353,7 +359,7 @@ def transcribe(ffmpeg, track, duration, language="ru", hint=None, on_note=None):
         if size <= LIMIT_MB:
             if on_note:
                 on_note(f"отправляю в Groq {size:.0f} МБ ({duration / 60:.0f} мин звука)")
-            words = _words(_ask(whole, language, hint))
+            words = _words(_ask(whole, language))
             _note_spent(duration)
             if on_note:
                 on_note(f"Groq вернул {len(words)} слов")
@@ -373,7 +379,7 @@ def transcribe(ffmpeg, track, duration, language="ru", hint=None, on_note=None):
             start = max(0.0, number * span - (OVERLAP if number else 0.0))
             length = span + (OVERLAP if number else 0.0)
             piece = _compress(ffmpeg, track, folder, start, length)
-            part = _words(_ask(piece, language, hint), shift=start)
+            part = _words(_ask(piece, language), shift=start)
 
             # Шов: выбрасываем слова, попавшие в зону нахлёста повторно.
             if words:

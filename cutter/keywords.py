@@ -60,28 +60,11 @@ IT_TERMS = {
     "cicd": ("сиай", "пайплайн", "pipeline", "деплой", "выкатыва"),
 }
 
-# Как те же термины положено писать в кадре. Распознаватель сам выбирает
-# между «кубернетес» и «Kubernetes», и без подсказки выбирает на слух.
-IT_SPELLING = {
-    "devops": "DevOps",
-    "kubernetes": "Kubernetes",
-    "docker": "Docker",
-    "linux": "Linux",
-    "ansible": "Ansible",
-    "terraform": "Terraform",
-    "jenkins": "Jenkins",
-    "gitlab": "GitLab",
-    "python": "Python",
-    "bash": "Bash",
-    "nginx": "nginx",
-    "postgres": "PostgreSQL",
-    "kafka": "Kafka",
-    "prometheus": "Prometheus",
-    "aws": "AWS",
-    "mlops": "MLOps",
-    "sre": "SRE",
-    "cicd": "CI/CD",
-}
+# Написание терминов для подсказки распознавателю (IT_SPELLING), словарь
+# ролика из его же расшифровки (learned_terms) и сборка самой подсказки
+# (speech_hint) жили здесь ради initial_prompt. Подсказку мы больше не
+# передаём — она подменяла речь названием ролика, замер в speech._run, —
+# и всё, что её готовило, уехало вместе с ней.
 
 # Всегда чуть подтягиваем то, вокруг чего у айтишного канала строится смысл.
 IT_BOOST = (
@@ -112,45 +95,6 @@ def from_title(title):
     terms += IT_BOOST
 
     return list(dict.fromkeys(terms))
-
-
-def learned_terms(words, limit=10, least=3, sure=0.6):
-    """Словарь ролика, добытый из него самого — по беглой расшифровке.
-
-    Отличие от top_terms: там мы показываем человеку, что скрипт понял,
-    и одного упоминания достаточно. Здесь слова пойдут обратно в модель
-    подсказкой, а это опасная петля: подсказать ослышку — значит закрепить
-    ошибку. Поэтому два фильтра.
-
-    least — слово должно прозвучать несколько раз. Ловит случайный шум,
-    но против системной ослышки бессилен: говорящего с акцентом модель
-    перевирает одинаково каждый раз, и «дыхательные» станут «дикательными»
-    во всех отрезках сразу.
-
-    sure — своя оценка модели. Вот она как раз проседает там, где модель
-    гадала, и это единственный признак ошибки, доступный без эталона.
-    У субтитров YouTube оценки нет, там всегда единица, и фильтр молчит.
-    """
-    if not words:
-        return []
-
-    scores = weights(words)
-    said = {}
-    best = {}
-    for word, score in zip(words, scores):
-        stem = normalize(word.text)
-        if not stem or getattr(word, "sure", 1.0) < sure:
-            continue
-        said[stem] = said.get(stem, 0) + 1
-        if score > best.get(stem, (0.0, ""))[0]:
-            best[stem] = (score, word.text.strip(".,!?:;«»\"'()"))
-
-    ranked = sorted(
-        (row for stem, row in best.items() if said[stem] >= least),
-        key=lambda row: row[0],
-        reverse=True,
-    )
-    return [text for _, text in ranked[:limit]]
 
 
 NEAR = 12
@@ -199,48 +143,6 @@ def related(words, seeds, limit=6, near=NEAR):
         reverse=True,
     )
     return [text for _, text in ranked[:limit]]
-
-
-def speech_hint(title, heard=(), limit=8):
-    """Подсказка распознавателю: как пишутся термины, которые он услышит.
-
-    Whisper принимает initial_prompt — текст, который он считает сказанным
-    прямо перед записью. Это не приказ, а образец: по нему модель подхватывает
-    и написание терминов, и манеру расставлять знаки. Поэтому подсказка —
-    не список слов, а обычные предложения с точками.
-
-    Длинной её делать нельзя: она занимает то же окно, что и речь, а на тишине
-    модель начинает повторять подсказку вместо текста. Отсюда и limit.
-
-    heard — слова, которые в ролике реально прозвучали (см. learned_terms).
-    Это главный источник: он работает на любой теме, а не только на айтишной,
-    и не требует держать словарь на все случаи жизни.
-    """
-    lowered = (title or "").lower()
-
-    named = [
-        IT_SPELLING.get(canon, canon)
-        for canon, variants in IT_TERMS.items()
-        if canon in lowered or any(variant in lowered for variant in variants)
-    ]
-
-    parts = []
-    if lowered.strip():
-        # Само название — это ещё и имена собственные, написанные верно.
-        parts.append(title.strip().rstrip(".!?") + ".")
-
-    # Айтишный словарь подсовываем, только если ролик сам о нём заявил.
-    # Навязать его всем подряд — значит на ролике про дыхательные практики
-    # подсказать модели «Kubernetes»: она послушная и найдёт, что услышать.
-    if named:
-        parts.append("Разговор об IT: " + ", ".join(named[:limit]) + ".")
-        parts.append("Обсуждаем собеседования, офферы, грейды, продакшн и найм.")
-
-    heard = [word for word in heard if word]
-    if heard:
-        parts.append("В ролике звучит: " + ", ".join(heard[:limit]) + ".")
-
-    return " ".join(parts)
 
 
 def normalize(text):

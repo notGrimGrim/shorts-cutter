@@ -15,7 +15,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from . import keywords, machine
+from . import machine
 from .subs import Word
 
 # Чем крупнее модель, тем точнее и медленнее. medium заметно устойчивее small
@@ -25,7 +25,8 @@ from .subs import Word
 MODELS = ("tiny", "base", "small", "medium", "large-v3")
 DEFAULT = "medium"
 
-# Беглого прохода здесь больше нет — почему, написано в vocabulary().
+# Беглого прохода по ролику ради словаря терминов здесь больше нет: словарь
+# готовился для initial_prompt, а промпт мы не передаём.
 
 
 class Unavailable(RuntimeError):
@@ -113,13 +114,6 @@ def ready(model=DEFAULT):
     return have[-1] if have else model
 
 
-# Ниже этой уверенности слово в словарь-подсказку не идёт (см. vocabulary).
-# Значение взято с потолка и не проверено замером: в кэше расшифровок оценка
-# модели до сих пор не сохранялась, сравнить ослышки с настоящими словами
-# было не на чем. Ошибка здесь дёшева — слишком высокий порог оставит
-# подсказку пустой, то есть вернёт поведение, которое и так было до словаря.
-SURE_ENOUGH = 0.65
-
 # Сколько кусков звука отдавать видеокарте разом. Без батчей она простаивает
 # между короткими шагами декодирования: замер на восьми минутах речи —
 # 55.5 с обычным проходом против 13.6 с батчами, вчетверо.
@@ -170,7 +164,7 @@ def _engine(model, device=None, batched=True):
     return BatchedInferencePipeline(engine)
 
 
-def _run(engine, track, language, hint=None):
+def _run(engine, track, language):
     """Гоняет распознавание до конца.
 
     Модель отдаёт отрезки лениво, поэтому обходим их прямо здесь: нехватка
@@ -182,7 +176,7 @@ def _run(engine, track, language, hint=None):
         # Тишину и музыку не распознаём: иначе модель придумывает слова.
         vad_filter=True,
         # initial_prompt НЕ передаём. Задумывался он как словарь темы —
-        # показать модели, как пишутся термины (см. keywords.speech_hint), —
+        # показать модели, как пишутся термины, —
         # но на живом ролике оказался главной причиной «Whisper плохо
         # слышит». Замер на стриме CS2 (xtxjqOJJvhM), один и тот же кусок
         # звука 1700–1740 с:
@@ -199,8 +193,9 @@ def _run(engine, track, language, hint=None):
         # (5 и 18 слов на тех же кусках) — значит дело в самом механизме,
         # а не в тексте, и правильного текста здесь не существует.
         #
-        # Аргумент hint оставлен: его передают cloud.transcribe и вызовы
-        # выше по коду, и молча ломать их сигнатуры ради этой правки незачем.
+        # Вместе с промптом убран и весь сбор словаря под него: подсказка
+        # больше не собирается, не кэшируется в hint.txt и не протаскивается
+        # через полтора десятка сигнатур.
         beam_size=BEAM,
         # Модель НЕ кормится собственным прошлым выводом. По умолчанию
         # библиотека делает наоборот, и на музыке, скандировании и криках это
@@ -252,7 +247,7 @@ def _download_failed(message):
     return any(mark in message.lower() for mark in _NETWORK)
 
 
-def _transcribe(track, model, language, on_note=None, hint=None):
+def _transcribe(track, model, language, on_note=None):
     """Считает тем, что есть на этой машине; не вышло — процессором.
 
     Устройство не задаём жёстко: на машине без карты NVIDIA просить «cuda»
@@ -260,7 +255,7 @@ def _transcribe(track, model, language, on_note=None, hint=None):
     machine.describe(), который проверяет это у самого ctranslate2.
     """
     try:
-        return _run(_engine(model), track, language, hint)
+        return _run(_engine(model), track, language)
     except Exception as error:
         text = str(error)
 
@@ -276,7 +271,7 @@ def _transcribe(track, model, language, on_note=None, hint=None):
                         f"модель {model} не скачалась ({text.splitlines()[0][:90]}). "
                         f"Беру {spare} — она уже на диске"
                     )
-                return _run(_engine(spare), track, language, hint)
+                return _run(_engine(spare), track, language)
             raise Unavailable(
                 f"модель {model} не скачалась, а других на диске нет.\n"
                 f"  Проверь сеть и повтори — качается она один раз."
@@ -289,7 +284,7 @@ def _transcribe(track, model, language, on_note=None, hint=None):
         if on_note:
             blame = "видеокарта" if "cud" in text.lower() else "распознавание"
             on_note(f"{blame} не сработало ({error}), пробую процессором")
-        return _run(_engine(model, "cpu", batched=False), track, language, hint)
+        return _run(_engine(model, "cpu", batched=False), track, language)
 
 
 def _cache_file(workdir, model):
@@ -347,7 +342,7 @@ def track_wav(ffmpeg, source, workdir):
 
 
 def for_segment(ffmpeg, track, start, end, model=DEFAULT, language="ru",
-                on_note=None, hint=None):
+                on_note=None):
     """Распознаёт только выбранный кусок и возвращает слова в его времени.
 
     Гонять модель по всему ролику незачем: для выбора моментов хватает
@@ -356,73 +351,13 @@ def for_segment(ffmpeg, track, start, end, model=DEFAULT, language="ru",
     """
     with tempfile.TemporaryDirectory() as folder:
         piece = _to_wav(ffmpeg, track, folder, start, end - start)
-        words = _transcribe(piece, model, language, on_note, hint)
+        words = _transcribe(piece, model, language, on_note)
 
     # Время внутри куска отсчитывалось от нуля — возвращаем к времени ролика.
     for word in words:
         word.start += start
         word.end += start
     return words
-
-
-def vocabulary(workdir, title="", on_note=None):
-    """Словарь ролика для подсказки распознавателю.
-
-    Whisper принимает initial_prompt — образец текста, по которому подхватывает
-    написание терминов и имён. Образец должен быть из этого же разговора,
-    иначе он не помогает.
-
-    Раньше словарь добывался беглым проходом: лёгкая модель слушала пять
-    кусков по 45 секунд по всей длине. На живых роликах это дало «знаю,
-    компании, целом, нам, почему» — частотную лексику вместо терминов, и
-    понятно почему: пять окон — это два процента сорокаминутного разговора,
-    и трижды в такой выборке попадается только то, что говорят всегда и все.
-    Пользы ноль, а вред возможен: подсказать ослышку — значит закрепить её,
-    модель послушная. Заодно проход стоил 13 секунд и грузил видеокарту даже
-    тогда, когда расшифровка шла в облако.
-
-    Поэтому словарь берётся из полной расшифровки, которая уже лежит в папке
-    ролика: на ней тот же keywords.learned_terms выдаёт «Полиграф»,
-    «Headhunter», «IDE», «нейронкой» — то, ради чего подсказка и нужна.
-    На первом прогоне расшифровки ещё нет, и подсказка стоит на названии;
-    на повторном (другая длина шортса, другие моменты) она уже настоящая.
-    """
-    cache = workdir / "hint.txt"
-    known = sorted(workdir.glob("whisper-*.json"))
-
-    # Подсказка, записанная до расшифровки, собрана вслепую — по одному
-    # названию. Появилась расшифровка — пересобираем по ней.
-    if cache.exists() and (
-        not known or cache.stat().st_mtime > known[0].stat().st_mtime
-    ):
-        return cache.read_text(encoding="utf-8")
-
-    heard = ()
-    if known:
-        try:
-            saved = json.loads(known[0].read_text(encoding="utf-8"))
-            # Только то, в чём модель сама уверена. Подсказка — это образец
-            # ПРАВОПИСАНИЯ, и ослышка в ней закрепляет ошибку: на стриме CS2
-            # в словарь попали «ПОПЕДА» и «КАЕВ», и следующий прогон получал
-            # их как эталон. Модель послушная — писала бы так и дальше.
-            trusted = [
-                Word(w["start"], w["end"], w["text"], sure=w.get("sure", 1.0))
-                for w in saved
-                if w.get("sure", 1.0) >= SURE_ENOUGH
-            ]
-            heard = keywords.learned_terms(trusted)
-        except (OSError, ValueError, KeyError, TypeError) as error:
-            # Без словаря распознавание просто останется прежним — это не повод
-            # ронять весь запуск.
-            if on_note:
-                on_note(f"словарь собрать не вышло ({error}), обойдусь названием")
-
-    hint = keywords.speech_hint(title, heard)
-    if on_note and heard:
-        on_note(f"словарь ролика: {', '.join(heard)}")
-
-    cache.write_text(hint, encoding="utf-8")
-    return hint
 
 
 def where_to_run(duration=None):
@@ -446,12 +381,12 @@ def where_to_run(duration=None):
     return "local" if machine.describe()["fast"] else "cloud"
 
 
-def _from_cloud(ffmpeg, track, duration, language, hint, on_note):
+def _from_cloud(ffmpeg, track, duration, language, on_note):
     """Пробует облако. Не вышло — возвращает None, и считаем сами."""
     from . import cloud
 
     try:
-        return cloud.transcribe(ffmpeg, track, duration, language, hint, on_note)
+        return cloud.transcribe(ffmpeg, track, duration, language, on_note)
     except cloud.QuotaSpent as stop:
         # Не ошибка: бесплатная квота кончилась, это ожидаемый исход.
         if on_note:
@@ -463,7 +398,7 @@ def _from_cloud(ffmpeg, track, duration, language, hint, on_note):
 
 
 def transcribe(ffmpeg, track, workdir, model=DEFAULT, language="ru",
-               on_note=None, hint=None, duration=None, where="auto"):
+               on_note=None, duration=None, where="auto"):
     """Распознаёт дорожку и отдаёт слова с таймкодами.
 
     Результат кладётся рядом с видео: распознавание идёт минуты, повторять
@@ -490,19 +425,18 @@ def transcribe(ffmpeg, track, workdir, model=DEFAULT, language="ru",
 
     words = None
     if where == "cloud" and duration:
-        words = _from_cloud(ffmpeg, track, duration, language, hint, on_note)
+        words = _from_cloud(ffmpeg, track, duration, language, on_note)
 
     if words is None:
         words = _transcribe(
-            track_wav(ffmpeg, track, workdir), model, language, on_note, hint
+            track_wav(ffmpeg, track, workdir), model, language, on_note
         )
 
     cache.write_text(
         json.dumps(
-            # sure пишем в кэш: это единственный признак ослышки, который у нас
-            # есть, а терялся он ровно здесь — на повторном прогоне все слова
-            # становились одинаково «верными», и словарь-подсказка собирался
-            # из мусора наравне с настоящими терминами (см. vocabulary).
+            # sure пишем в кэш: это единственный признак ослышки, который у
+            # нас есть, а терялся он ровно здесь — на повторном прогоне все
+            # слова становились одинаково «верными».
             [
                 {"start": w.start, "end": w.end, "text": w.text,
                  "sure": round(w.sure, 3)}
