@@ -159,7 +159,45 @@ def _candidates_file(slug):
     return download.workdir(slug) / "candidates.json"
 
 
-def _moments(words, marks, terms, energy, source, count, brain=True, talk=None):
+# Длина куска, когда человек её не задавал. Она НЕ равна коридору основного
+# пути (pairs.LOW/HIGH): это запас для резервного scan.find и порог, ниже
+# которого глава считается слишком короткой. Раньше эти же числа стояли
+# прямо в default= у --min/--max, и отличить «человек попросил 40–90» от
+# «человек ничего не просил» было нельзя.
+MIN_DEFAULT = 40.0
+MAX_DEFAULT = 90.0
+
+
+def window(args):
+    """Коридор длины окна для pairs.plan — только если его задал человек.
+
+    Молча сужать основной путь до 40–90 нельзя: окна там строятся по своему
+    коридору (pairs.LOW/HIGH), и это осознанный выбор, а не умолчание
+    командной строки. Поэтому пустые --min/--max означают «как в pairs», а
+    заданный хотя бы один — «человек знает, чего хочет».
+    """
+    if args.min is None and args.max is None:
+        return {}
+    return {
+        "low": args.min if args.min is not None else pairs.LOW,
+        "high": args.max if args.max is not None else pairs.HIGH,
+    }
+
+
+def span(args):
+    """Заданная длина куска в секундах, с умолчанием: (минимум, максимум).
+
+    Этим живёт всё, что не умеет работать без чисел: резервный scan.find,
+    отсечка коротких глав, тексты ошибок. Основной путь спрашивает window().
+    """
+    asked = window(args)
+    if asked:
+        return asked["low"], asked["high"]
+    return MIN_DEFAULT, MAX_DEFAULT
+
+
+def _moments(words, marks, terms, energy, source, count, brain=True, talk=None,
+             window_args=None):
     """Что резать: пары «вопрос → ответ», отобранные по хуку.
 
     Порядок работы задан замыслом: сначала вопрос — из главы, если она есть,
@@ -181,6 +219,7 @@ def _moments(words, marks, terms, energy, source, count, brain=True, talk=None):
         words, marks, terms, dict(enumerate(energy)) if energy else None,
         count, video_title=_title(source), source=source, brain=brain,
         on_note=talk or (lambda note: print(f"  {note}")),
+        **(window_args or {}),
     )
 
 
@@ -311,11 +350,6 @@ def _transcribe(source, slug, args, ffmpeg=None):
         # до отправки, а не после отказа сервера.
         duration=length,
         where=getattr(args, "engine", "auto"),
-        # Словарь ролика — из его же расшифровки, если она уже есть в
-        # рабочей папке. На первом прогоне подсказка стоит на названии.
-        hint=speech.vocabulary(
-            download.workdir(slug), _title(source), on_note=talk
-        ),
     )
 
 
@@ -343,9 +377,11 @@ def _analyze(source, args, ffmpeg=None):
     if not words:
         raise SystemExit("расшифровка пустая — разбирать нечего")
 
+    least, _ = span(args)
+
     marks = ()
     if _is_url(source):
-        marks = chapters.from_info(download.probe(source), args.min)
+        marks = chapters.from_info(download.probe(source), least)
         if marks:
             print(f"  главы: {len(marks)} — ищу лучшее внутри каждой")
 
@@ -374,24 +410,25 @@ def cmd_scan(args):
     slug, words, marks, terms, energy = _analyze(args.source, args)
 
     must = _must_words(args)
+    least, most = span(args)
 
     # Со словами-обязательствами ищем по-старому: там человек задаёт, о чём
     # шортс, и пары «вопрос → ответ» этот заказ не выполняют.
     if must:
         found = scan.find(
-            words, args.min, args.max, args.top, terms, marks, energy, must=must
+            words, least, most, args.top, terms, marks, energy, must=must
         )
     else:
         found = _moments(words, marks, terms, energy, args.source, args.top,
-                         brain=args.brain)
+                         brain=args.brain, window_args=window(args))
         if not found:
             found = scan.find(
-                words, args.min, args.max, args.top, terms, marks, energy
+                words, least, most, args.top, terms, marks, energy
             )
 
     if not found:
         raise SystemExit(
-            f"ни одного куска длиной {args.min:.0f}–{args.max:.0f}с"
+            f"ни одного куска длиной {least:.0f}–{most:.0f}с"
             + (f" со словами {', '.join(must)}" if must else "")
             + " — попробуй раздвинуть --min/--max"
         )
@@ -502,19 +539,21 @@ def cmd_auto(args):
             slug, words, marks, terms, energy = _analyze(source, args, ffmpeg)
 
             found = _moments(words, marks, terms, energy, source, args.count,
-                             brain=args.brain)
+                             brain=args.brain, window_args=window(args))
             if not found:
                 # Пар «вопрос → ответ» не нашлось: бывает на монологах и на
                 # роликах, где расшифровка потеряла все знаки вопроса. Тогда
                 # работает прежний расчёт по плотности речи.
                 print("  пар «вопрос → ответ» не нашлось — ищу по-старому")
+                least, most = span(args)
                 found = scan.find(
-                    words, args.min, args.max, args.count, terms, marks, energy,
+                    words, least, most, args.count, terms, marks, energy,
                     must=_must_words(args),
                 )
             if not found:
+                least, most = span(args)
                 raise RuntimeError(
-                    f"не нашлось кусков длиной {args.min:.0f}–{args.max:.0f}с"
+                    f"не нашлось кусков длиной {least:.0f}–{most:.0f}с"
                 )
 
             print(f"  выбрано моментов: {len(found)}")
@@ -569,8 +608,14 @@ def _add_subs_flags(parser, with_file=True):
 
 
 def _add_window_flags(parser):
-    parser.add_argument("--min", type=float, default=40.0, help="минимум секунд")
-    parser.add_argument("--max", type=float, default=90.0, help="максимум секунд")
+    parser.add_argument(
+        "--min", type=float, default=None,
+        help=f"минимум секунд (по умолчанию окна {pairs.LOW:.0f}–{pairs.HIGH:.0f}с)",
+    )
+    parser.add_argument(
+        "--max", type=float, default=None,
+        help=f"максимум секунд (по умолчанию окна {pairs.LOW:.0f}–{pairs.HIGH:.0f}с)",
+    )
     parser.add_argument(
         "--boost", default="",
         help="через запятую слова, вокруг которых искать: оффер,зарплата",

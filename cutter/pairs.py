@@ -705,7 +705,7 @@ def build(words, marks=(), low=LOW, high=HIGH):
 
 
 def plan(words, marks=(), terms=(), energy=None, count=3, video_title="",
-         source="", brain=True, on_note=None):
+         source="", brain=True, on_note=None, low=LOW, high=HIGH):
     """Полный путь: окна → свой счёт → отбор моделью.
 
     Одна точка сборки на всех: и командная строка, и окно, и мастер зовут
@@ -714,10 +714,16 @@ def plan(words, marks=(), terms=(), energy=None, count=3, video_title="",
 
     brain=False значит «не звать модель»: порядок задаёт свой счёт. Так же
     выйдет и само собой, если ни Groq, ни Ollama недоступны.
+
+    low/high — коридор длины окна. Раньше их тут не было вовсе, и заданная
+    человеком длина (--min/--max, ползунок «Своя длина» в окне) до основного
+    пути не доходила: она уважалась только резервным scan.find, то есть
+    ровно тогда, когда окон не нашлось совсем. Просьба «нарежь по 40 секунд»
+    молча выполнялась как 25–120.
     """
     talk = on_note or (lambda note: None)
 
-    built = build(words, marks)
+    built = build(words, marks, low, high)
     if not built:
         return []
 

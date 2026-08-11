@@ -26,7 +26,7 @@ from tkinter import filedialog, ttk
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import cut
-from cutter import cloud, download, jobs, machine, render, speech, think
+from cutter import cloud, download, jobs, machine, pairs, render, speech, think
 from cutter.paths import OUT
 
 # Frutiger Aero, но не корпоративный, а домашний: луг, стекло, крем.
@@ -820,7 +820,7 @@ class Window:
             self.span.set_status(
                 f"{self.span_min.get():.0f}–{self.span_max.get():.0f} с", "on")
         else:
-            self.span.set_status("40–90 с", "off")
+            self.span.set_status(f"{pairs.LOW:.0f}–{pairs.HIGH:.0f} с", "off")
 
         if self.cut_at.on.get():
             frm, to = self.cut_from.get().strip(), self.cut_to.get().strip()
@@ -837,7 +837,9 @@ class Window:
             else:
                 self.pace.set_status(f"{self.speed.get():.2f}×", "on")
         else:
-            self.pace.set_status("1.0×", "off")
+            # Не «1.0×»: выключенная галка означает автоподбор — разгон
+            # включится сам и только если кусок не влезает в формат.
+            self.pace.set_status("сам", "off")
 
         if self.words.on.get():
             if self.must.get().strip():
@@ -936,20 +938,29 @@ class Window:
 
     def _args(self):
         """Собирает те же самые параметры, что принимает командная строка."""
-        low, high = 40.0, 90.0
+        # Своя длина не задана — не задаём её и командной строке: None там
+        # значит «коридор как в pairs», а не «40–90». Прибив тут числа, окно
+        # молча сужало основной путь до тех, что стоят на ползунках.
+        low = high = None
         if self.span.on.get():
             low, high = self.span_min.get(), self.span_max.get()
             if high < low + 5:
                 high = low + 5
 
-        speed = 1.0
+        # Ускорение выключено — это «подбери сам, если кусок не влезает», а
+        # не «ровно 1.0». Единица здесь означала бы заданную вручную скорость
+        # (см. render.fit_speed), и разгон в окне не работал вовсе, в отличие
+        # от командной строки, где --speed по умолчанию None.
+        speed = None
         if self.pace.on.get():
             speed = 0.0 if self.fit_minute.get() else round(self.speed.get(), 2)
 
         return Namespace(
             sources=[self.source.get().strip().strip('"')],
             source=self.source.get().strip().strip('"'),
-            min=float(low), max=float(high), top=10,
+            min=float(low) if low is not None else None,
+            max=float(high) if high is not None else None,
+            top=10,
             count=int(self.count.get()),
             boost=self.boost.get() if self.words.on.get() else "",
             must=self.must.get() if self.words.on.get() else "",
@@ -1035,9 +1046,14 @@ class Window:
 
         slug, words, _, _, _ = cut._analyze(args.source, args, ffmpeg)
         video = cut._video(args.source, slug, args.height, ffmpeg)
+        # Раскладку считаем и здесь. Без неё «Кадр стопкой» вместе со «Своим
+        # таймкодом» выходил ни тем ни другим: render не знал, кого куда
+        # ставить, и рисовал обычный кадр на размытом фоне, а место сверху
+        # под плашку всё равно отводилось по-стопочному — надпись висела
+        # в пустоте над картинкой.
         cut._make(
             ffmpeg, video, slug, None if args.no_subs else words,
-            start, end, args,
+            start, end, args, tiles=cut._tiles(ffmpeg, video, slug),
         )
         print(f"\nГотово: 1 шортс в {OUT}/")
 
